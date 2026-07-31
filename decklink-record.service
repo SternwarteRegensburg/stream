@@ -1,0 +1,31 @@
+[Unit]
+Description=Record DeckLink HLS stream to file
+# The DeckLink card allows only one reader, so we record the HLS output
+# of decklink-hls.service instead of opening the capture device again.
+After=decklink-hls.service
+Requires=decklink-hls.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+ExecStartPre=/bin/mkdir -p /var/www/recordings
+
+# The output name is built at start time, hence the shell wrapper.
+# `exec` keeps ffmpeg as the main process so KillSignal reaches it.
+ExecStart=/bin/sh -c 'exec /usr/local/bin/ffmpeg -hide_banner -nostdin -loglevel warning \
+  -live_start_index -1 \
+  -i /var/www/stream/playlist.m3u8 \
+  -c copy -f matroska \
+  /var/www/recordings/rec_$(date +%%Y-%%m-%%d_%%H-%%M-%%S).mkv'
+
+# On failure a new recording file is started; a manual stop does not restart.
+Restart=on-failure
+RestartSec=2
+
+# SIGINT lets ffmpeg finalize the container before exiting.
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+# No [Install] section: recording is started on demand, never at boot.
