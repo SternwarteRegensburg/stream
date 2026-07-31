@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DeckLink Live Stream</title>
+  <style>
+    body {
+      margin: 0;
+      background: #1a1a1a;
+      color: #eee;
+      font-family: system-ui, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    h1 {
+      font-weight: 400;
+      margin: 20px 0;
+    }
+    #video-container {
+      width: 100%;
+      max-width: 1280px;
+      background: #000;
+      box-shadow: 0 0 20px rgba(0,0,0,0.6);
+    }
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+    #status {
+      margin: 12px;
+      font-size: 0.9rem;
+      color: #aaa;
+    }
+    .error { color: #ff6b6b; }
+    .ok { color: #51cf66; }
+  </style>
+</head>
+<body>
+  <h1>Hörsaal Übertragung</h1>
+
+  <div id="video-container">
+    <video id="video" controls autoplay muted playsinline></video>
+  </div>
+
+  <div id="status">Initializing…</div>
+
+  <!-- hls.js from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <script>
+    const video  = document.getElementById('video');
+    const status = document.getElementById('status');
+
+    // Adjust this path to match where FFmpeg writes the playlist.
+    // If served from the same Apache, a relative path works:
+    const streamUrl = '/stream/playlist.m3u8';
+
+    function setStatus(msg, cls = '') {
+      status.textContent = msg;
+      status.className = cls;
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        liveSyncDurationCount: 3,   // stay close to the live edge
+        lowLatencyMode: true,
+        backBufferLength: 30
+      });
+
+      hls.loadSource(streamUrl);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setStatus('Stream connected — playing live.', 'ok');
+        video.play().catch(() => {
+          setStatus('Autoplay blocked — click play.', 'error');
+        });
+      });
+
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          switch (data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              setStatus('Network error — retrying…', 'error');
+              hls.startLoad();
+              break;
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              setStatus('Media error — recovering…', 'error');
+              hls.recoverMediaError();
+              break;
+            default:
+              setStatus('Fatal error — cannot recover.', 'error');
+              hls.destroy();
+              break;
+          }
+        }
+      });
+
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS support (Safari, iOS)
+      video.src = streamUrl;
+      video.addEventListener('loadedmetadata', () => {
+        setStatus('Stream connected (native HLS).', 'ok');
+        video.play();
+      });
+      video.addEventListener('error', () => {
+        setStatus('Failed to load stream.', 'error');
+      });
+
+    } else {
+      setStatus('Your browser does not support HLS playback.', 'error');
+    }
+  </script>
+</body>
+</html>
+

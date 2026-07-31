@@ -1,0 +1,35 @@
+[Unit]
+Description=DeckLink HDMI to HLS stream
+After=network-online.target apache2.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+
+# Recreate/clean the stream dir on every start
+RuntimeDirectory=decklink-hls
+ExecStartPre=/bin/rm -rf /var/www/stream
+ExecStartPre=/bin/mkdir -p /var/www/stream
+ExecStartPre=/bin/chown www-data:www-data /var/www/stream
+
+ExecStart=/usr/local/bin/ffmpeg -hide_banner -nostdin -loglevel warning \
+  -f decklink -video_input hdmi -queue_size 1073741824 \
+  -i "DeckLink Mini Recorder HD" \
+  -c:v libx264 -preset veryfast -tune zerolatency \
+  -pix_fmt yuv420p -b:v 6M -maxrate 6M -bufsize 12M \
+  -g 50 -keyint_min 50 -sc_threshold 0 \
+  -c:a aac -b:a 128k -ar 48000 -ac 2 \
+  -f hls -hls_time 2 -hls_list_size 6 \
+  -hls_flags delete_segments+omit_endlist+independent_segments \
+  -hls_segment_filename /var/www/stream/seg_%%05d.ts \
+  /var/www/stream/playlist.m3u8
+
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
