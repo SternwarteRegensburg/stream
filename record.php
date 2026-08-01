@@ -1,31 +1,43 @@
 <?php
 /*
- * Start/stop the recording of the DeckLink HLS stream.
+ * Start/stop the DeckLink HLS stream and its recording.
  *
  * Install:
  *   cp record.php /var/www/record.php
  *   cp decklink-record.service /etc/systemd/system/
- *   cp decklink-record.sudoers /etc/sudoers.d/decklink-record  (mode 0440)
+ *   cp decklink-record.sudoers /etc/sudoers.d/decklink-record  (root:root, mode 0440)
  *   systemctl daemon-reload
  *
+ * The sudoers file name must not contain a dot — sudo silently skips
+ * such files in /etc/sudoers.d.
+ *
  * Protect this file with Apache authentication — anyone who can open it
- * can start and stop recordings.
+ * can start and stop the stream and recordings.
  */
 
-const UNIT       = 'decklink-record.service';
-const REC_DIR    = '/var/www/recordings';
-const REC_URL    = '/recordings';
+const UNIT_REC = 'decklink-record.service';
+const UNIT_HLS = 'decklink-hls.service';
+const REC_DIR  = '/var/www/recordings';
+const REC_URL  = '/recordings';
 
-function unit_is_active(): bool
+/* Only these unit/action pairs are ever passed to systemctl. */
+const ACTIONS = [
+    'rec-start' => [UNIT_REC, 'start', 'Recording started.'],
+    'rec-stop'  => [UNIT_REC, 'stop',  'Recording stopped.'],
+    'hls-start' => [UNIT_HLS, 'start', 'Stream started.'],
+    'hls-stop'  => [UNIT_HLS, 'stop',  'Stream stopped.'],
+];
+
+function unit_is_active(string $unit): bool
 {
-    exec('systemctl is-active --quiet ' . escapeshellarg(UNIT), $out, $code);
+    exec('systemctl is-active --quiet ' . escapeshellarg($unit), $out, $code);
     return $code === 0;
 }
 
-/** Wall-clock start of the current recording, or null if not recording. */
-function unit_started_at(): ?int
+/** Wall-clock time the unit became active, or null if it is not running. */
+function unit_started_at(string $unit): ?int
 {
-    exec('systemctl show -p ActiveEnterTimestamp --value ' . escapeshellarg(UNIT), $out);
+    exec('systemctl show -p ActiveEnterTimestamp --value ' . escapeshellarg($unit), $out);
     $ts = trim(implode('', $out));
     if ($ts === '') {
         return null;
@@ -34,36 +46,42 @@ function unit_started_at(): ?int
     return $time === false ? null : $time;
 }
 
-function control(string $action): array
+function control(string $unit, string $action, string $okMsg): array
 {
-    $cmd = 'sudo -n /usr/bin/systemctl ' . $action . ' ' . escapeshellarg(UNIT) . ' 2>&1';
+    $cmd = 'sudo -n /usr/bin/systemctl ' . $action . ' ' . escapeshellarg($unit) . ' 2>&1';
     exec($cmd, $out, $code);
     if ($code === 0) {
-        return [$action === 'start' ? 'Recording started.' : 'Recording stopped.', 'ok'];
+        return [$okMsg, 'ok'];
     }
-    return ['systemctl ' . $action . ' failed: ' . trim(implode(' ', $out)), 'error'];
+    return ['systemctl ' . $action . ' ' . $unit . ' failed: ' . trim(implode(' ', $out)), 'error'];
 }
 
 /* --- handle the form (POST/redirect/GET so reloads do not re-submit) --- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? '';
-    if ($action === 'start' && !unit_is_active()) {
-        [$msg, $cls] = control('start');
-    } elseif ($action === 'stop' && unit_is_active()) {
-        [$msg, $cls] = control('stop');
+    $key = $_POST['action'] ?? '';
+    if (!isset(ACTIONS[$key])) {
+        [$msg, $cls] = ['Unknown action.', 'error'];
     } else {
-        [$msg, $cls] = ['Nothing to do — state already as requested.', ''];
+        [$unit, $action, $okMsg] = ACTIONS[$key];
+        $active = unit_is_active($unit);
+        if (($action === 'start') === $active) {
+            [$msg, $cls] = ['Nothing to do — state already as requested.', ''];
+        } else {
+            [$msg, $cls] = control($unit, $action, $okMsg);
+        }
     }
     header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?')
         . '?msg=' . urlencode($msg) . '&cls=' . urlencode($cls));
     exit;
 }
 
-$message   = $_GET['msg'] ?? '';
+$message    = $_GET['msg'] ?? '';
 $messageCls = in_array($_GET['cls'] ?? '', ['ok', 'error'], true) ? $_GET['cls'] : '';
-$recording = unit_is_active();
-$startedAt = $recording ? unit_started_at() : null;
-$selfUrl   = strtok($_SERVER['REQUEST_URI'], '?');
+$recording  = unit_is_active(UNIT_REC);
+$streaming  = unit_is_active(UNIT_HLS);
+$recStarted = $recording ? unit_started_at(UNIT_REC) : null;
+$hlsStarted = $streaming ? unit_started_at(UNIT_HLS) : null;
+$selfUrl    = strtok($_SERVER['REQUEST_URI'], '?');
 
 /* newest recordings first */
 $files = [];
@@ -90,7 +108,7 @@ function human_duration(int $seconds): string
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <?php if ($recording || $message !== ''): ?>
+  <?php if ($recording || $streaming || $message !== ''): ?>
     <!-- keep duration/file size current, and drop the message from the URL -->
     <meta http-equiv="refresh" content="15;url=<?= htmlspecialchars($selfUrl) ?>">
   <?php endif; ?>
@@ -122,9 +140,20 @@ function human_duration(int $seconds): string
       padding: 20px;
       margin-bottom: 24px;
     }
+    .panel h2 {
+      font-weight: 400;
+      font-size: 1rem;
+      color: #aaa;
+      margin: 0 0 12px;
+    }
     .state {
       font-size: 1.1rem;
       margin: 0 0 16px;
+    }
+    p.hint {
+      color: #888;
+      font-size: 0.85rem;
+      margin: 10px 0 0;
     }
     .dot {
       display: inline-block;
@@ -173,7 +202,7 @@ function human_duration(int $seconds): string
   </style>
 </head>
 <body>
-  <h1>Aufzeichnung</h1>
+  <h1>Übertragung &amp; Aufzeichnung</h1>
 
   <main>
     <nav><a href="/">&larr; Zum Livestream</a></nav>
@@ -183,12 +212,39 @@ function human_duration(int $seconds): string
     <?php endif; ?>
 
     <div class="panel">
+      <h2>Livestream</h2>
+      <p class="state">
+        <span class="dot <?= $streaming ? 'on' : 'off' ?>"></span>
+        <?php if ($streaming): ?>
+          Streaming<?php if ($hlsStarted !== null): ?>
+            since <?= htmlspecialchars(date('H:i:s', $hlsStarted)) ?>
+            (<?= human_duration(max(0, time() - $hlsStarted)) ?>)
+          <?php endif; ?>
+        <?php else: ?>
+          Stopped
+        <?php endif; ?>
+      </p>
+
+      <form method="post">
+        <?php if ($streaming): ?>
+          <button class="stop" name="action" value="hls-stop" type="submit">Stop stream</button>
+          <?php if ($recording): ?>
+            <p class="hint">Stopping the stream also ends the running recording.</p>
+          <?php endif; ?>
+        <?php else: ?>
+          <button class="start" name="action" value="hls-start" type="submit">Start stream</button>
+        <?php endif; ?>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2>Aufzeichnung</h2>
       <p class="state">
         <span class="dot <?= $recording ? 'on' : 'off' ?>"></span>
         <?php if ($recording): ?>
-          Recording<?php if ($startedAt !== null): ?>
-            since <?= htmlspecialchars(date('H:i:s', $startedAt)) ?>
-            (<?= human_duration(max(0, time() - $startedAt)) ?>)
+          Recording<?php if ($recStarted !== null): ?>
+            since <?= htmlspecialchars(date('H:i:s', $recStarted)) ?>
+            (<?= human_duration(max(0, time() - $recStarted)) ?>)
           <?php endif; ?>
         <?php else: ?>
           Not recording
@@ -197,15 +253,18 @@ function human_duration(int $seconds): string
 
       <form method="post">
         <?php if ($recording): ?>
-          <button class="stop" name="action" value="stop" type="submit">Stop recording</button>
+          <button class="stop" name="action" value="rec-stop" type="submit">Stop recording</button>
         <?php else: ?>
-          <button class="start" name="action" value="start" type="submit">Start recording</button>
+          <button class="start" name="action" value="rec-start" type="submit">Start recording</button>
+          <?php if (!$streaming): ?>
+            <p class="hint">Starting a recording also starts the stream.</p>
+          <?php endif; ?>
         <?php endif; ?>
       </form>
     </div>
 
     <div class="panel">
-      <h2 style="font-weight:400;font-size:1rem;margin:0 0 12px;">Recordings</h2>
+      <h2>Recordings</h2>
       <?php if (!$files): ?>
         <p class="empty">No recordings yet.</p>
       <?php else: ?>

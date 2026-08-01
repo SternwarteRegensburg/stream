@@ -1,3 +1,6 @@
-# Install as /etc/sudoers.d/decklink-record with mode 0440, owner root:root.
-# Allows the web server to control only the recording unit, nothing else.
-www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start decklink-record.service, /usr/bin/systemctl stop decklink-record.service
+# Install as /etc/sudoers.d/decklink-record with owner root:root, mode 0440.
+# The file name must not contain a dot: sudo silently ignores files in
+# /etc/sudoers.d whose names contain '.' or end in '~'.
+#
+# Allows the web server to control only these two units, nothing else.
+www-data ALL=(root) NOPASSWD: /usr/bin/systemctl start decklink-record.service, /usr/bin/systemctl stop decklink-record.service, /usr/bin/systemctl start decklink-hls.service, /usr/bin/systemctl stop decklink-hls.service
